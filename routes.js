@@ -20,7 +20,7 @@ router.delete('/services/:id', protect, adminProtect, controllers.deleteService)
 // --- Therapists Route ---
 router.get('/therapists', protect, controllers.getAllTherapists);
 
-// --- Schedule Routes ---
+// --- Employee Schedule Routes ---
 router.get('/schedules/:employeeId', protect, controllers.getEmployeeSchedule);
 router.post('/schedules', protect, controllers.updateEmployeeSchedule);
 
@@ -44,4 +44,3 @@ router.get('/employees/:internalUserId/services', protect, controllers.getEmploy
 router.put('/employees/:internalUserId/services', protect, controllers.updateEmployeeServices);
 
 module.exports = router;
-

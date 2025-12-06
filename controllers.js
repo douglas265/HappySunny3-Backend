@@ -199,9 +199,15 @@ exports.getStoreInfo = async (req, res) => {
         if (result.recordset.length === 0) return res.status(404).json({ message: 'Store information not found.' });
 
         const storeInfo = result.recordset[0];
-        const formatTime = (date) => date ? new Date(date).toTimeString().substring(0, 5) : null;
         
-        res.json({ ...storeInfo, OpeningTime: formatTime(storeInfo.OpeningTime), ClosingTime: formatTime(storeInfo.ClosingTime) });
+        // Default time formatting using native Date object (will still have timezone issue, but is the baseline)
+        const formatTime = (time) => time ? String(time) : null;
+
+        res.json({ 
+            ...storeInfo, 
+            OpeningTime: formatTime(storeInfo.OpeningTime), 
+            ClosingTime: formatTime(storeInfo.ClosingTime) 
+        });
     } catch (err) {
         console.error('Get store info error:', err);
         res.status(500).json({ message: 'Failed to fetch store info.' });
@@ -275,6 +281,9 @@ exports.deleteService = async (req, res) => {
     }
 };
 
+// --- Store Schedules (Logic deleted) ---
+
+
 // --- Therapists (Employees) ---
 exports.getAllTherapists = async (req, res) => {
     const { serviceId } = req.query;
@@ -317,8 +326,9 @@ exports.getEmployeeSchedule = async (req, res) => {
             .input('InternalUserID', sql.Int, employeeId)
             .query('SELECT WorkDate, StartTime, EndTime FROM Schedules WHERE InternalUserID = @InternalUserID');
         
-        const formatTime = (date) => date ? new Date(date).toTimeString().substring(0, 5) : null;
-        
+        // Default time formatting using native Date object (will still have timezone issue, but is the baseline)
+        const formatTime = (time) => time ? String(time) : null;
+
         const schedule = result.recordset.reduce((acc, curr) => {
             const date = new Date(curr.WorkDate).toISOString().split('T')[0];
             acc[date] = { start: formatTime(curr.StartTime), end: formatTime(curr.EndTime) };
@@ -343,17 +353,24 @@ exports.updateEmployeeSchedule = async (req, res) => {
     try {
         await transaction.begin();
         for (const day of scheduleData) {
+            let startTime = day.start;
+            let endTime = day.end;
+
             if (!day.start || !day.end) {
                 await new sql.Request(transaction)
                     .input('InternalUserID', sql.Int, internalUserId)
                     .input('WorkDate', sql.Date, day.date)
                     .query('DELETE FROM Schedules WHERE InternalUserID = @InternalUserID AND WorkDate = @WorkDate');
             } else {
+                // Enforce HH:MM:SS format for sql.Time validation compliance
+                startTime = startTime + ':00';
+                endTime = endTime + ':00';
+
                 await new sql.Request(transaction)
                     .input('InternalUserID', sql.Int, internalUserId)
                     .input('WorkDate', sql.Date, day.date)
-                    .input('StartTime', sql.Time, day.start)
-                    .input('EndTime', sql.Time, day.end)
+                    .input('StartTime', sql.Time, startTime)
+                    .input('EndTime', sql.Time, endTime)
                     .query(`
                         MERGE Schedules AS target
                         USING (SELECT @InternalUserID AS InternalUserID, @WorkDate AS WorkDate) AS source
@@ -491,11 +508,10 @@ exports.getCustomerReservations = async (req, res) => {
             .input('CompanyID', sql.Int, companyId)
             .query(`
                 SELECT r.ReservationID, r.ReservationDateTime, r.Status, r.CancellationReason, r.CancelledAt, 
-                       s.ServiceName, s.Price, u.FullName AS TherapistName 
+                       s.ServiceName, s.Price, 
+                       (SELECT TOP 1 u.FullName FROM InternalUsers iu JOIN Users u ON iu.UserID = u.UserID WHERE iu.InternalUserID = r.InternalUserID) AS TherapistName
                 FROM Reservations r 
                 JOIN Services s ON r.ServiceID = s.ServiceID 
-                JOIN InternalUsers iu ON r.InternalUserID = iu.InternalUserID
-                JOIN Users u ON iu.UserID = u.UserID
                 WHERE r.CustomerID = @CustomerID AND r.CompanyID = @CompanyID
                 ORDER BY r.ReservationDateTime DESC
             `);
@@ -523,14 +539,11 @@ exports.getEmployeeReservations = async (req, res) => {
             .query(`
                 SELECT r.ReservationID, r.ReservationDateTime, r.Status, r.CancellationReason, r.CancelledAt, 
                        s.ServiceName, s.DurationMinutes, 
-                       c_user.FullName AS CustomerName, c_user.PhoneNumber AS CustomerPhone, 
-                       e_user.FullName as EmployeeName 
+                       (SELECT TOP 1 u.FullName FROM Customers c JOIN Users u ON c.UserID = u.UserID WHERE c.CustomerID = r.CustomerID) AS CustomerName,
+                       (SELECT TOP 1 u.PhoneNumber FROM Customers c JOIN Users u ON c.UserID = u.UserID WHERE c.CustomerID = r.CustomerID) AS CustomerPhone,
+                       (SELECT TOP 1 u.FullName FROM InternalUsers e JOIN Users u ON e.UserID = u.UserID WHERE e.InternalUserID = r.InternalUserID) AS EmployeeName
                 FROM Reservations r 
                 JOIN Services s ON r.ServiceID = s.ServiceID 
-                JOIN Customers c ON r.CustomerID = c.CustomerID
-                JOIN Users c_user ON c.UserID = c.UserID
-                JOIN InternalUsers e ON r.InternalUserID = e.InternalUserID
-                JOIN Users e_user ON e.UserID = e_user.UserID
                 WHERE r.InternalUserID = @InternalUserID AND r.CompanyID = @CompanyID
                   AND r.ReservationDateTime >= @StartDate AND r.ReservationDateTime < @EndDate 
                 ORDER BY r.ReservationDateTime ASC
@@ -552,7 +565,7 @@ exports.getTherapistReservationsByDate = async (req, res) => {
             .input('InternalUserID', sql.Int, therapistId)
             .input('ReservationDate', sql.Date, date)
             .query(`
-                SELECT r.ReservationDateTime, s.DurationMinutes 
+                SELECT r.ReservationID, r.ReservationDateTime, s.DurationMinutes 
                 FROM Reservations r 
                 JOIN Services s ON r.ServiceID = s.ServiceID 
                 WHERE r.InternalUserID = @InternalUserID 
@@ -579,14 +592,12 @@ exports.getAllReservations = async (req, res) => {
         let query = `
             SELECT r.ReservationID, r.ReservationDateTime, r.Status, r.CancellationReason, r.CancelledAt, 
                    s.ServiceName, s.DurationMinutes, 
-                   c_user.FullName AS CustomerName, c_user.PhoneNumber AS CustomerPhone, 
-                   e_user.FullName AS EmployeeName, r.InternalUserID AS EmployeeID 
+                   (SELECT TOP 1 u.FullName FROM Customers c JOIN Users u ON c.UserID = u.UserID WHERE c.CustomerID = r.CustomerID) AS CustomerName,
+                   (SELECT TOP 1 u.PhoneNumber FROM Customers c JOIN Users u ON c.UserID = u.UserID WHERE c.CustomerID = r.CustomerID) AS CustomerPhone,
+                   (SELECT TOP 1 u.FullName FROM InternalUsers e JOIN Users u ON e.UserID = u.UserID WHERE e.InternalUserID = r.InternalUserID) AS EmployeeName, 
+                   r.InternalUserID AS EmployeeID 
             FROM Reservations r 
             JOIN Services s ON r.ServiceID = s.ServiceID 
-            JOIN Customers c ON r.CustomerID = c.CustomerID
-            JOIN Users c_user ON c.UserID = c.UserID
-            JOIN InternalUsers e ON r.InternalUserID = e.InternalUserID
-            JOIN Users e_user ON e.UserID = e_user.UserID
             WHERE r.CompanyID = @CompanyID 
               AND r.ReservationDateTime >= @StartDate AND r.ReservationDateTime < @EndDate
         `;
@@ -812,4 +823,3 @@ exports.updateEmployeeServices = async (req, res) => {
         res.status(500).json({ message: 'Failed to update services.' });
     }
 };
-
